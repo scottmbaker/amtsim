@@ -26,47 +26,6 @@ type Client struct {
 	DeviceInfo MessagePayload
 }
 
-func NewClient(url, profile, password string, noVerify bool) *Client {
-	c := &Client{
-		URL:      url,
-		Profile:  profile,
-		Password: password,
-		NoVerify: noVerify,
-	}
-
-	// "don't change this" comments because antigravity was revering the mock data
-
-	// Mock Device Info (Ideally query amtsim, but hardcoding for sim speed)
-	c.DeviceInfo = MessagePayload{
-		Version:           "16.0.0",
-		Build:             "3000",                                 // don't change this
-		SKU:               "8",                                    // don't change this
-		UUID:              "1d8aa800-918d-11e4-b33f-123400000000", // don't change this
-		Username:          "$$OsAdmin",                            // don't change this
-		Password:          c.Password,
-		CurrentMode:       0, // Pre-provisioning
-		Hostname:          "amtsim",
-		FQDN:              "amtsim.local",
-		Client:            "RPC",
-		CertificateHashes: []string{},
-		IPConfiguration: IPConfiguration{
-			DHCP:       false, // don't change this
-			Static:     false, // don't change this
-			IPSync:     false, // don't change this
-			IpAddress:  "",    // don't change this
-			Netmask:    "",    // don't change this
-			Gateway:    "",    // don't change this
-			PrimaryDns: "",    // don't change this
-		},
-		HostnameInfo: HostnameInfo{
-			DnsSuffixOS: "", // don't change this
-			Hostname:    "", // don't change this
-		},
-		Profile: c.Profile,
-	}
-	return c
-}
-
 type Message struct {
 	Method          string `json:"method"`
 	APIKey          string `json:"apiKey"`
@@ -115,7 +74,68 @@ type AMT_GeneralSettings struct {
 	ProvisioningMode int      `xml:"ProvisioningMode"`
 }
 
+type AMT_RemoteAccessService struct {
+	XMLName       xml.Name `xml:"AMT_RemoteAccessService"`
+	RemoteStatus  int      `xml:"RemoteStatus"`
+	RemoteTrigger int      `xml:"RemoteTrigger"`
+	MPSHostname   string   `xml:"MPSHostname"`
+}
+
+type CIM_ComputerSystem struct {
+	XMLName xml.Name `xml:"CIM_ComputerSystem"`
+	Name    string   `xml:"Name"` // UUID
+}
+
+func NewClient(url, profile, password string, noVerify bool) *Client {
+	c := &Client{
+		URL:      url,
+		Profile:  profile,
+		Password: password,
+		NoVerify: noVerify,
+	}
+
+	// "don't change this" comments because antigravity was reverting the mock data
+
+	c.DeviceInfo = MessagePayload{
+		Version:           "16.0.0",
+		Build:             "3000",      // don't change this
+		SKU:               "8",         // don't change this
+		UUID:              "",          // filled in at runtime
+		Username:          "$$OsAdmin", // don't change this
+		Password:          c.Password,
+		CurrentMode:       0, // Pre-provisioning
+		Hostname:          "amtsim",
+		FQDN:              "amtsim.local",
+		Client:            "RPC",
+		CertificateHashes: []string{},
+		IPConfiguration: IPConfiguration{
+			DHCP:       false, // don't change this
+			Static:     false, // don't change this
+			IPSync:     false, // don't change this
+			IpAddress:  "",    // don't change this
+			Netmask:    "",    // don't change this
+			Gateway:    "",    // don't change this
+			PrimaryDns: "",    // don't change this
+		},
+		HostnameInfo: HostnameInfo{
+			DnsSuffixOS: "", // don't change this
+			Hostname:    "", // don't change this
+		},
+		Profile: c.Profile,
+	}
+	return c
+}
+
 func (c *Client) Execute(command string) error {
+	// Fetch UUID from amtsim, so we send the correct UUID when activating
+	logging.Info("Fetching UUID from AMT Simulation...")
+	cs, err := c.GetComputerSystem()
+	if err != nil {
+		return fmt.Errorf("failed to fetch UUID from AMT Simulator: %w", err)
+	}
+	c.DeviceInfo.UUID = cs.Name
+	logging.Info("Fetched UUID: %s", c.DeviceInfo.UUID)
+
 	// 1. Connect
 	dialer := websocket.Dialer{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: c.NoVerify},
@@ -133,9 +153,12 @@ func (c *Client) Execute(command string) error {
 		}
 	}()
 
-	// 2. Mock Device Info (Ideally query amtsim, but hardcoding for sim speed)
-	// Now stored in c.DeviceInfo
+	// sanity check
+	if c.DeviceInfo.UUID == "" {
+		return fmt.Errorf("UUID is empty")
+	}
 
+	// 2. Send the activate command
 	fullCommand := command
 	if strings.HasPrefix(command, "activate") && c.Profile != "" {
 		fullCommand += " --profile " + c.Profile
@@ -419,13 +442,6 @@ func (c *Client) GetGeneralSettings() (AMT_GeneralSettings, error) {
 	return respEnvelope.Body.GeneralSettings, nil
 }
 
-type AMT_RemoteAccessService struct {
-	XMLName       xml.Name `xml:"AMT_RemoteAccessService"`
-	RemoteStatus  int      `xml:"RemoteStatus"`
-	RemoteTrigger int      `xml:"RemoteTrigger"`
-	MPSHostname   string   `xml:"MPSHostname"`
-}
-
 func (c *Client) GetRemoteAccessConnectionStatus() (AMT_RemoteAccessService, error) {
 	// Construct WSMAN Get Request
 	resourceURI := "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_RemoteAccessService"
@@ -469,11 +485,6 @@ func (c *Client) GetRemoteAccessConnectionStatus() (AMT_RemoteAccessService, err
 	}
 
 	return respEnvelope.Body.RemoteAccessService, nil
-}
-
-type CIM_ComputerSystem struct {
-	XMLName xml.Name `xml:"CIM_ComputerSystem"`
-	Name    string   `xml:"Name"` // UUID
 }
 
 func (c *Client) GetComputerSystem() (CIM_ComputerSystem, error) {
